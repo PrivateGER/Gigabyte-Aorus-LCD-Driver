@@ -1,0 +1,15 @@
+[Unit]
+Description=Gigabyte GPU LCD service
+After=graphical-session.target
+ConditionPathExists=%h/.local/bin/gigabyte-lcd
+ConditionPathExists=%h/.config/gigabyte-lcd/background.png
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gigabyte-lcd --mascot %h/.config/gigabyte-lcd/background.png --bus 1 --addr 0x61 --device-id 0x21 --image-settle-delay 20 --metrics temp,usage,power --overlay-interval 4 --log-level info
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+[package]
+name = "gigabyte-lcd"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Linux control service for Gigabyte AORUS GPU LCD panels"
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+gif = "0.13.3"
+png = "0.18.1"
+
+[dev-dependencies]
+tempfile = "3.23.0"
