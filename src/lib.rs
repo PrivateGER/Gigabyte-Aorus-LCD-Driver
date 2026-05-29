@@ -3,6 +3,7 @@ pub mod gif;
 pub mod image;
 pub mod logging;
 pub mod protocol;
+pub mod rgb_discovery;
 pub mod rgb_protocol;
 pub mod service;
 pub mod telemetry;
