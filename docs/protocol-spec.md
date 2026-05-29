@@ -635,8 +635,88 @@ NvAPI_GPU_ClientIllumZonesSetControl
 ```
 
 This means some GCC/RGB Fusion paths use NVIDIA client illumination zones through
-NVAPI. The managed `GvLedApiEx` path documented above instead builds direct RGB
-Ex I2C packets.
+NVAPI. NVIDIA's public NVAPI header defines these as
+`NV_GPU_CLIENT_ILLUM_ZONE_INFO_PARAMS_V1` and
+`NV_GPU_CLIENT_ILLUM_ZONE_CONTROL_PARAMS_V1`, with a maximum of 32 zones and
+140-byte/200-byte zone records respectively.
+
+`GvIllumLib.dll` resolves the public NVAPI entry points through
+`nvapi_QueryInterface`. The recovered QueryInterface ids are:
+
+| QueryInterface id | Function |
+| --- | --- |
+| `0x4b81241b` | `NvAPI_GPU_ClientIllumZonesGetInfo` |
+| `0x3dbf5764` | `NvAPI_GPU_ClientIllumZonesGetControl` |
+| `0x197d065e` | `NvAPI_GPU_ClientIllumZonesSetControl` |
+
+`GvGetIllumZonesInfo(card_index, out)` compresses the NVAPI info struct into a
+0x204-byte Gigabyte struct:
+
+```text
+struct GvIllumZonesInfo {
+    ZoneInfo zones[32];    // 32 * 16 bytes
+    u32 num_zones;         // offset 0x200
+}
+
+struct ZoneInfo {
+    u32 illum_device_idx;  // from NVAPI zone byte +0x04
+    u32 provider_idx;      // from NVAPI zone byte +0x05
+    u32 zone_location;     // from NVAPI zone dword +0x08
+    u32 zone_type;         // from NVAPI zone dword +0x00
+}
+```
+
+`GvGetIllumZonesControl(card_index, inout)` and
+`GvSetIllumZonesControl(card_index, inout)` use a 0x44-byte Gigabyte zone-control
+record. Offset `0x00` selects the zone index. Offsets `0x04` and `0x08` carry the
+NVAPI `ctrlMode` and `type`, and the remaining fields are mode-specific control
+data copied into or out of NVAPI's zone-control union. The set path first reads
+the complete NVAPI control array, replaces only the selected zone, then calls
+`NvAPI_GPU_ClientIllumZonesSetControl`.
+
+`GvLedLib.dll` also has a separate native I2C path for N50 AORUS cards
+(`CVgaN50AORUSLedCtrl`). This does not use `GvIllumLib.dll`; it builds
+`GVDISP_I2C_REGADDR` structures and calls `GVDisplay.dll` directly. The native
+helper uses:
+
+| Field | Value |
+| --- | --- |
+| `nSavePort` | `0xe2` shifted address, likely Linux 7-bit `0x71` |
+| `nDDCPort` | `1` |
+| `nDataSize` | `8` for the recovered LED commands |
+
+The N50 probe is a read at `0xe2` with register bytes:
+
+```text
+ab 00 00 00
+```
+
+The response is accepted when byte `0` is `0xab`; byte `1` is parsed as a BCD-ish
+firmware version, and byte `3` selects the LED id:
+
+| Response byte 3 | Full LED id |
+| --- | --- |
+| `0x0b` | `0x1018` |
+| `0x10` | `0x1015` |
+| `0x11` | `0x1019` |
+| `0x13` | `0x1020` |
+| `0x14` | `0x1021` |
+
+For this card, the native N50 probe maps response tag `0x13` to the same
+`0x1020` full LED id recovered from `device.db`.
+
+The native N50 real-time color path sends an enable/effect write before the first
+color write, then sends color updates as register bytes:
+
+```text
+88 01 05 63 00 01   // first enable/effect write before normal RGB updates
+88 03 05 63 00 01   // alternate enable/effect write when the high color byte is non-zero
+40 rr gg bb         // real-time RGB color
+```
+
+The native N50 path is therefore a third RGB transport candidate, distinct from
+the managed RGB Ex `I2CApiEx` path. It is not proven on Linux yet, and should be
+treated as a read-first probe target before any write support is exposed.
 
 ## 11. Windows Transport Notes
 
