@@ -432,34 +432,211 @@ visible frame-time hitches while games were running.
 
 All LCD I2C writes SHOULD be serialized through a single writer.
 
-## 10. Ex Protocol Status
+## 10. GCC Ex and RGB Protocol Notes
 
-Gigabyte Control Center also contains a newer Ex protocol path. It is not
-implemented by this project.
+Gigabyte Control Center contains newer Ex paths in addition to the old LCD
+protocol implemented by this project. The Ex paths are documented here as
+reverse-engineering notes; they are not yet proven as working Linux transports.
 
-Known Ex details:
+### 10.1 Transport Split
+
+The managed `ucVga.dll` code has three relevant I2C wrappers:
+
+| Wrapper | GCC use | Buffer size | GCC/native address field | Linux 7-bit equivalent |
+| --- | --- | --- | --- | --- |
+| `I2CApi` | Old LCD protocol | 256 bytes | Caller supplies shifted `0xc2` | `0x61`, proven |
+| `I2CApi4LcdEx` | LCD Ex protocol | 256 bytes | Caller supplies `0x76`, wrapper shifts to `0xec` | `0x76`, unproven |
+| `I2CApiEx` | RGB Ex protocol | 64 bytes | Wrapper ignores caller and hardcodes `0xea` | likely `0x75`, unproven |
+
+All three wrappers set DDC port `1`, use no register-address phase
+(`nRegAddrUsed = 0`), copy the command bytes into `szRegAddr`, and report native
+success when `GvWriteI2C`/`GvReadI2C` returns `0`.
+
+`I2CApi4LcdEx` retries writes/reads up to three times at speed `100`.
+`I2CApiEx` retries writes/reads up to two times; RGB writes use speed `50`,
+while RGB reads use speed `100`.
+
+The current GCC log for this card showed `GvLcdExApi.GetFWVersion` failing, then
+GCC falling back to the old LCD path. The old `0x61` LCD protocol therefore
+remains the only proven LCD transport for this hardware.
+
+### 10.2 LCD Ex Commands
+
+LCD Ex commands use 256-byte packets with this shape:
 
 ```text
-candidate 7-bit address: 0x76
-candidate shifted address: 0xec
-command prefix shape: <opcode> 0x01 ...
-candidate Linux bus that ACKed 0x76: /dev/i2c-4
+u8 opcode
+u8 subcommand = 0x01 or transfer segment
+u8[] args
+u8[] zero_padding_to_256_bytes
 ```
 
-Known Ex commands from recovered Windows code:
+Known LCD Ex commands:
 
-| Opcode | Meaning |
+| Opcode | Packet | Meaning |
+| --- | --- | --- |
+| `0x10` | `10 01` read 4 bytes | Firmware/version read, version is response bytes `2.3` |
+| `0x12` | `12 01 effect speed bright r g b 00 area` | LCD-side LED area set |
+| `0x13` | `13 01` | LCD-side LED save |
+| `0x14` | `14 01 target` | Reset, `target=1` LED or `2` LCD |
+| `0x15` | `15 01 state` | Open LCD, `state=1` enable or `2` disable |
+| `0x16` | `16 01 mode` | Set LCD mode |
+| `0x17` | `17 01 open [display interval r g b]` | Set display overlay open/closed and overlay attributes |
+| `0x18` | `18 01 mode x_percent y_percent` | Set status overlay position |
+| `0x19` | `19 01` | Set PC-power-off mode |
+| `0x21` | segmented 140-byte packets | Upload LCD data |
+| `0x22` | `22 01 count interval [mode tag]...` | Set loop/carousel list |
+| `0x24` | `24 01` | Save LCD settings |
+
+`0x17` first sends only the open flag. If open is `1`, GCC sends the same packet
+again with display, interval, and RGB bytes populated. For LCD modes other than
+`0`, `1`, and `2`, GCC also sends `0x18` with positions clamped to `0..100`
+after multiplying the stored fractional positions by `100`.
+
+`0x21` uploads data without the old `0xf1`/`0xf2` transaction wrapper. GCC splits
+the payload into 256-byte blocks, then sends two 128-byte segments for each
+block:
+
+```text
+u8 opcode = 0x21
+u8 segment = 1 for first 128 bytes, 2 for second 128 bytes
+u8 upload_mode
+u8 file_picture_count
+u16 block_index_le
+u16 block_count_le
+u8 segment_payload_len = 0x80
+u8[3] reserved_zero
+u8[128] segment_payload_ff_padded
+```
+
+GCC sleeps 1 ms after segment 1 and 2 ms after segment 2.
+
+### 10.3 RGB Ex Device Resolution
+
+GCC resolves the LED UI id from `device.db` through `GetModelLedUIID`, parsing
+the database string as hexadecimal. For the observed card:
+
+| Field | Value |
 | --- | --- |
-| `0x10` | Firmware/version read |
-| `0x15` | Open LCD |
-| `0x16` | Set mode |
-| `0x17` | Set display overlay |
-| `0x18` | Overlay position |
-| `0x23` | Metric values |
+| Model | `GV-N5080AORUSM ICE-16GD` |
+| Database key | `10DE_1458_418C_2C02` |
+| Database `UiId` | `"20"` |
+| Simple LED id | `0x20` / decimal `32` |
+| Full LED id at card index 0 | `0x1020` |
 
-Linux tests against the Ex candidate returned zero firmware data and produced
-no visible LCD effect. Ex MUST be treated as unsupported until a working Linux
-transport is proven.
+The `0x20` UI class exposes a global region, a 3-by-8 fan region group, and
+simple regions `5` and `6`. Its setting-region map is:
+
+| Setting index | Region |
+| --- | --- |
+| `0` | Global/all |
+| `1` | Fan group `2` |
+| `2` | Region `5` |
+| `3` | Region `6` |
+
+### 10.4 RGB Ex Commands
+
+RGB Ex uses 64-byte packets through `I2CApiEx`. Known commands:
+
+| Opcode | Packet | Meaning |
+| --- | --- | --- |
+| `0x10` | `10 01` read 4 bytes | RGB firmware/version read; response byte `1 == 2` marks Ex-4N firmware |
+| `0x11` | `11 01` read 4 bytes | Model SSID read; SSID is `(response[2] << 8) | response[3]` |
+| `0x12` | effect packet | RGB LED set |
+| `0x13` | `13 01` | RGB LED save |
+| `0x16` | sync packet | Real-time/sync color |
+| `0x17` | `17 01` read 4 bytes | App-close profile support check; `response[2] == 1` means no profile reset needed |
+| `0x18` | `18 01` | App-close notification |
+
+The RGB sync packet is:
+
+```text
+u8 opcode = 0x16
+u8 subcommand = 0x01
+u8 color_top_byte
+u8 effect_or_mode = 0x06
+u8 reserved_zero
+u8 red
+u8 green
+u8 blue
+```
+
+### 10.5 RGB Ex LED Set Packets
+
+All RGB Ex `0x12` LED set packets share this base layout:
+
+```text
+u8 opcode = 0x12
+u8 subcommand = 0x01
+u8 wire_effect_id
+u8 speed
+u8 brightness
+u8 red
+u8 green
+u8 blue
+u8 angle
+u8 physical_packet_index
+u8 color_count
+u8[] rgb_triples
+```
+
+GCC maps UI effect ids to RGB Ex wire effect ids as follows:
+
+| UI effect | Wire effect |
+| --- | --- |
+| `0` | `0` |
+| `1` | `1` |
+| `2` | `2` |
+| `3` | `5` |
+| `4` | `3` |
+| `5` | `7` |
+| `6` | `8` |
+| `7` | `6` |
+| `8` | `4` |
+| `9` | `12` |
+| `10` | `11` |
+| `11` | `10` for simple ids `18`/`22`, otherwise `9` |
+| `12` | `10` |
+| `13` | `10` |
+
+For simple ids `0x15`, `0x18`, `0x19`, `0x20`, `0x21`, `0x22`, and `0x23`
+GCC sends six physical packets. For the current simple id `0x20`, packet indices
+`0`, `1`, and `2` address the fan group, while indices `3`, `4`, and `5` address
+simple selectors `2`, `3`, and `4`. The UI only supplies explicit settings for
+selectors `0`, `1`, `2`, and `3`, so selector `4` falls back to the last setting.
+
+For fan-group packets with wire effects `1`, `2`, `3`, or `4`, GCC writes eight
+RGB triples starting at byte `11`. The fan source groups are reordered:
+
+| Packet index | Fan source group |
+| --- | --- |
+| `0` | group `2` |
+| `1` | group `0` |
+| `2` | group `1` |
+
+For wire effects `8`, `9`, `10`, and `12`, GCC writes `ClrCount` and RGB triples
+from the normal color array instead.
+
+### 10.6 Native Illumination Path
+
+The native `GvLedLib.dll` in the same GCC install was built from a
+`GvLedLib_New_241202_Add_N50_Lcd` tree and imports `GvIllumLib.dll`. That
+library exports generic illumination-zone APIs and contains UTF-16 strings for:
+
+```text
+nvapi64.dll
+nvldumd.dll
+nvldumdx.dll
+PCI\VEN_10DE&CC_0300
+PCI\VEN_10DE&CC_0302
+NvAPI_GPU_ClientIllumZonesGetInfo
+NvAPI_GPU_ClientIllumZonesGetControl
+NvAPI_GPU_ClientIllumZonesSetControl
+```
+
+This means some GCC/RGB Fusion paths use NVIDIA client illumination zones through
+NVAPI. The managed `GvLedApiEx` path documented above instead builds direct RGB
+Ex I2C packets.
 
 ## 11. Windows Transport Notes
 
