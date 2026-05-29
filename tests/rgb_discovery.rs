@@ -131,3 +131,24 @@ fn run_rgb_discovery_uses_per_request_addresses_and_keeps_going_after_errors() {
             .contains("0x1020")
     );
 }
+
+#[test]
+fn discovery_report_display_includes_probe_details_and_decode_status() {
+    let transport = FakeProbeTransport::with_responses(vec![
+        Ok(vec![0, 2, 1, 4]),
+        Err(io::Error::other("no ack")),
+        Ok(vec![0xab, 0x14, 0, 0x13, 0, 0, 0, 0]),
+    ]);
+
+    let report = run_rgb_discovery(&transport, ProbeAddresses::default());
+    let text = report.to_string();
+
+    assert!(text.contains("RGB Ex firmware"));
+    assert!(text.contains("addr=0x75"));
+    assert!(text.contains("request=10 01"));
+    assert!(text.contains("read_len=4"));
+    assert!(text.contains("response=00 02 01 04"));
+    assert!(text.contains("error=no ack"));
+    assert!(text.contains("N50 native"));
+    assert!(text.contains("0x1020"));
+}

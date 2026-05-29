@@ -1,19 +1,26 @@
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use gigabyte_lcd::gif::{
     GifLimits, MAX_GIF_CONTENT_HEIGHT_DEFAULT, MAX_GIF_FRAMES_DEFAULT, MAX_GIF_FRAMES_EXCLUSIVE,
     MIN_GIF_DELAY_MS,
 };
 use gigabyte_lcd::logging::LogLevel;
 use gigabyte_lcd::protocol::DEFAULT_BUS;
+use gigabyte_lcd::rgb_discovery::{
+    N50_NATIVE_LINUX_ADDR_CANDIDATE, ProbeAddresses, RGB_EX_LINUX_ADDR_CANDIDATE,
+};
 use gigabyte_lcd::service::OverlayConfig;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(test)]
-use std::io;
+#[derive(Debug)]
+pub(crate) enum Args {
+    Run(RunArgs),
+    ProbeRgb(ProbeRgbArgs),
+}
 
 #[derive(Debug)]
-pub(crate) struct Args {
+pub(crate) struct RunArgs {
     pub(crate) mascot: PathBuf,
     pub(crate) gif: Option<PathBuf>,
     pub(crate) gif_limits: GifLimits,
@@ -26,6 +33,13 @@ pub(crate) struct Args {
     pub(crate) log_level: LogLevel,
 }
 
+#[derive(Debug)]
+pub(crate) struct ProbeRgbArgs {
+    pub(crate) i2c_dev: PathBuf,
+    pub(crate) addresses: ProbeAddresses,
+    pub(crate) log_level: LogLevel,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gigabyte-lcd",
@@ -34,12 +48,27 @@ pub(crate) struct Args {
     long_about = None
 )]
 struct CliArgs {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
+    #[command(flatten)]
+    run: RunCliArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    #[command(about = "Run read-only probes for known Gigabyte GPU RGB backends")]
+    ProbeRgb(ProbeRgbCliArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct RunCliArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Required PNG to place on the left side"
+        help = "Required PNG to place on the left side in default run mode"
     )]
-    mascot: PathBuf,
+    mascot: Option<PathBuf>,
 
     #[arg(
         long,
@@ -148,29 +177,87 @@ struct CliArgs {
     log_level: LogLevel,
 }
 
+#[derive(Debug, ClapArgs)]
+struct ProbeRgbCliArgs {
+    #[arg(
+        long = "i2c-dev",
+        default_value = "/dev/i2c-1",
+        value_name = "PATH",
+        help = "Linux I2C device path to probe"
+    )]
+    i2c_dev: PathBuf,
+
+    #[arg(
+        long = "rgb-ex-address",
+        default_value_t = RGB_EX_LINUX_ADDR_CANDIDATE,
+        value_parser = parse_u16,
+        value_name = "ADDR",
+        help = "7-bit RGB Ex I2C address candidate"
+    )]
+    rgb_ex_address: u16,
+
+    #[arg(
+        long = "n50-address",
+        default_value_t = N50_NATIVE_LINUX_ADDR_CANDIDATE,
+        value_parser = parse_u16,
+        value_name = "ADDR",
+        help = "7-bit native N50 RGB I2C address candidate"
+    )]
+    n50_address: u16,
+
+    #[arg(
+        long = "log-level",
+        default_value = "info",
+        value_parser = parse_log_level,
+        value_name = "LEVEL",
+        help = "info or debug"
+    )]
+    log_level: LogLevel,
+}
+
 impl Args {
-    pub(crate) fn parse_cli() -> Self {
-        CliArgs::parse().into()
+    pub(crate) fn parse_cli() -> io::Result<Self> {
+        Args::try_from(CliArgs::parse())
+    }
+
+    pub(crate) fn log_level(&self) -> LogLevel {
+        match self {
+            Self::Run(args) => args.log_level,
+            Self::ProbeRgb(args) => args.log_level,
+        }
     }
 
     #[cfg(test)]
     fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Self> {
         let args = std::iter::once(String::from("gigabyte-lcd")).chain(args);
         CliArgs::try_parse_from(args)
-            .map(Self::from)
             .map_err(clap_error_to_io)
+            .and_then(Args::try_from)
     }
 }
 
-impl From<CliArgs> for Args {
-    fn from(cli: CliArgs) -> Self {
+impl TryFrom<CliArgs> for Args {
+    type Error = io::Error;
+
+    fn try_from(cli: CliArgs) -> io::Result<Self> {
+        match cli.command {
+            Some(CliCommand::ProbeRgb(probe)) => Ok(Self::ProbeRgb(probe.into())),
+            None => RunArgs::try_from(cli.run).map(Self::Run),
+        }
+    }
+}
+
+impl TryFrom<RunCliArgs> for RunArgs {
+    type Error = io::Error;
+
+    fn try_from(cli: RunCliArgs) -> io::Result<Self> {
         let mut gif_limits = GifLimits::default();
         gif_limits.max_frames_exclusive = cli.gif_max_frames + 1;
         gif_limits.min_delay_ms = cli.gif_min_delay_ms.max(1);
         gif_limits.max_content_height = cli.gif_content_height.clamp(1, gif_limits.height);
 
-        Self {
-            mascot: cli.mascot,
+        Ok(Self {
+            mascot: cli.mascot.ok_or_else(missing_mascot_error)?,
             gif: cli.gif,
             gif_limits,
             bus: cli.bus,
@@ -183,8 +270,28 @@ impl From<CliArgs> for Args {
             },
             gpu_index: cli.gpu_index,
             log_level: cli.log_level,
+        })
+    }
+}
+
+impl From<ProbeRgbCliArgs> for ProbeRgbArgs {
+    fn from(cli: ProbeRgbCliArgs) -> Self {
+        Self {
+            i2c_dev: cli.i2c_dev,
+            addresses: ProbeAddresses {
+                rgb_ex: cli.rgb_ex_address,
+                n50_native: cli.n50_address,
+            },
+            log_level: cli.log_level,
         }
     }
+}
+
+fn missing_mascot_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "default run mode requires --mascot PATH; use probe-rgb for read-only RGB probing",
+    )
 }
 
 #[cfg(test)]
@@ -279,9 +386,16 @@ mod tests {
     use super::*;
     use gigabyte_lcd::protocol::{DEFAULT_ADDR, DEFAULT_DEVICE_LED_ID};
 
+    fn parse_run(args: impl IntoIterator<Item = &'static str>) -> RunArgs {
+        match Args::parse(args.into_iter().map(String::from)).unwrap() {
+            Args::Run(args) => args,
+            Args::ProbeRgb(_) => panic!("expected default run mode"),
+        }
+    }
+
     #[test]
     fn default_settle_delay_is_panel_verified_when_mascot_is_provided() {
-        let args = Args::parse(["--mascot", "mascot.png"].into_iter().map(String::from)).unwrap();
+        let args = parse_run(["--mascot", "mascot.png"]);
 
         assert_eq!(args.image_settle_delay, Duration::from_secs(5));
     }
@@ -295,24 +409,46 @@ mod tests {
     }
 
     #[test]
-    fn parses_gif_limit_overrides() {
+    fn parses_probe_rgb_subcommand_without_mascot() {
         let args = Args::parse(
             [
-                "--mascot",
-                "mascot.png",
-                "--gif",
-                "input.gif",
-                "--gif-max-frames",
-                "30",
-                "--gif-min-delay-ms",
-                "75",
-                "--gif-content-height",
-                "160",
+                "probe-rgb",
+                "--i2c-dev",
+                "/tmp/i2c-test",
+                "--rgb-ex-address",
+                "0x76",
+                "--n50-address",
+                "0x72",
             ]
             .into_iter()
             .map(String::from),
         )
         .unwrap();
+
+        match args {
+            Args::ProbeRgb(probe) => {
+                assert_eq!(probe.i2c_dev, PathBuf::from("/tmp/i2c-test"));
+                assert_eq!(probe.addresses.rgb_ex, 0x76);
+                assert_eq!(probe.addresses.n50_native, 0x72);
+            }
+            Args::Run(_) => panic!("expected probe-rgb command"),
+        }
+    }
+
+    #[test]
+    fn parses_gif_limit_overrides() {
+        let args = parse_run([
+            "--mascot",
+            "mascot.png",
+            "--gif",
+            "input.gif",
+            "--gif-max-frames",
+            "30",
+            "--gif-min-delay-ms",
+            "75",
+            "--gif-content-height",
+            "160",
+        ]);
 
         assert_eq!(args.gif, Some(PathBuf::from("input.gif")));
         assert_eq!(args.gif_limits.max_frames_exclusive, 31);
@@ -322,21 +458,16 @@ mod tests {
 
     #[test]
     fn parses_hex_device_options() {
-        let args = Args::parse(
-            [
-                "--mascot",
-                "mascot.png",
-                "--bus",
-                "0x02",
-                "--addr",
-                "0x61",
-                "--device-id",
-                "0x21",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .unwrap();
+        let args = parse_run([
+            "--mascot",
+            "mascot.png",
+            "--bus",
+            "0x02",
+            "--addr",
+            "0x61",
+            "--device-id",
+            "0x21",
+        ]);
 
         assert_eq!(args.bus, 2);
         assert_eq!(args.addr, DEFAULT_ADDR);
@@ -345,17 +476,12 @@ mod tests {
 
     #[test]
     fn parses_metric_selection() {
-        let args = Args::parse(
-            [
-                "--mascot",
-                "mascot.png",
-                "--metrics",
-                "temp,gpu-clock,fan,vram-usage,pwr",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .unwrap();
+        let args = parse_run([
+            "--mascot",
+            "mascot.png",
+            "--metrics",
+            "temp,gpu-clock,fan,vram-usage,pwr",
+        ]);
 
         assert_eq!(
             args.overlay.flags,
@@ -365,12 +491,7 @@ mod tests {
 
     #[test]
     fn all_metrics_includes_fan_but_not_fps() {
-        let args = Args::parse(
-            ["--mascot", "mascot.png", "--metrics", "all"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
+        let args = parse_run(["--mascot", "mascot.png", "--metrics", "all"]);
 
         assert_eq!(
             args.overlay.flags,

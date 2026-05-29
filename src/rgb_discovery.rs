@@ -1,4 +1,5 @@
 use crate::transport::Transport;
+use std::fmt;
 use std::io;
 
 pub use crate::rgb_protocol::RGB_EX_LINUX_ADDR_CANDIDATE;
@@ -10,6 +11,16 @@ pub enum BackendKind {
     RgbExFirmware,
     RgbExSsid,
     N50Native,
+}
+
+impl fmt::Display for BackendKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RgbExFirmware => formatter.write_str("RGB Ex firmware"),
+            Self::RgbExSsid => formatter.write_str("RGB Ex SSID"),
+            Self::N50Native => formatter.write_str("N50 native"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +88,32 @@ pub struct DiscoveryReport {
 impl DiscoveryReport {
     pub fn any_success(&self) -> bool {
         self.results.iter().any(|result| result.response.is_some())
+    }
+}
+
+impl fmt::Display for DiscoveryReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "RGB discovery report")?;
+        for result in &self.results {
+            writeln!(
+                formatter,
+                "- {} addr=0x{:02x} request={} read_len={}",
+                result.backend,
+                result.address,
+                format_bytes(&result.request),
+                result.read_len
+            )?;
+            if let Some(response) = &result.response {
+                writeln!(formatter, "  response={}", format_bytes(response))?;
+            }
+            if let Some(decoded) = &result.decoded {
+                writeln!(formatter, "  decoded={decoded}")?;
+            }
+            if let Some(error) = &result.error {
+                writeln!(formatter, "  error={error}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -232,4 +269,15 @@ fn n50_full_led_id_for_tag(tag: u8) -> Option<u16> {
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn format_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(empty)".to_string();
+    }
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
