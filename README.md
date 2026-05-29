@@ -1,4 +1,4 @@
-# Gigabyte GPU LCD
+# Gigabyte GPU LCD driver
 
 Rust binary that can control the LCD on the Gigabyte GeForce RTX 5080 AORUS
 Master ICE. It may work with other Gigabyte LCD screens, but they can use
