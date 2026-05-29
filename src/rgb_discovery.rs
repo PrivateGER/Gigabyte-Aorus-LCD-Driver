@@ -1,3 +1,4 @@
+use crate::transport::Transport;
 use std::io;
 
 pub use crate::rgb_protocol::RGB_EX_LINUX_ADDR_CANDIDATE;
@@ -42,6 +43,43 @@ pub struct N50NativeInfo {
     pub full_led_id: Option<u16>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeAddresses {
+    pub rgb_ex: u16,
+    pub n50_native: u16,
+}
+
+impl Default for ProbeAddresses {
+    fn default() -> Self {
+        Self {
+            rgb_ex: RGB_EX_LINUX_ADDR_CANDIDATE,
+            n50_native: N50_NATIVE_LINUX_ADDR_CANDIDATE,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeResult {
+    pub backend: BackendKind,
+    pub address: u16,
+    pub request: Vec<u8>,
+    pub read_len: usize,
+    pub response: Option<Vec<u8>>,
+    pub decoded: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveryReport {
+    pub results: Vec<ProbeResult>,
+}
+
+impl DiscoveryReport {
+    pub fn any_success(&self) -> bool {
+        self.results.iter().any(|result| result.response.is_some())
+    }
+}
+
 pub fn build_default_probe_plan() -> ProbePlan {
     ProbePlan {
         requests: vec![
@@ -65,6 +103,50 @@ pub fn build_default_probe_plan() -> ProbePlan {
             },
         ],
     }
+}
+
+pub fn build_probe_plan(addresses: ProbeAddresses) -> ProbePlan {
+    let mut plan = build_default_probe_plan();
+    for request in &mut plan.requests {
+        request.address = match request.backend {
+            BackendKind::RgbExFirmware | BackendKind::RgbExSsid => addresses.rgb_ex,
+            BackendKind::N50Native => addresses.n50_native,
+        };
+    }
+    plan
+}
+
+pub fn run_rgb_discovery(transport: &impl Transport, addresses: ProbeAddresses) -> DiscoveryReport {
+    let mut results = Vec::new();
+    for request in build_probe_plan(addresses).requests {
+        let result =
+            match transport.write_read_at(request.address, &request.write, request.read_len) {
+                Ok(response) => {
+                    let decoded = decode_response(request.backend, &response)
+                        .unwrap_or_else(|error| format!("decode warning: {error}"));
+                    ProbeResult {
+                        backend: request.backend,
+                        address: request.address,
+                        request: request.write,
+                        read_len: request.read_len,
+                        response: Some(response),
+                        decoded: Some(decoded),
+                        error: None,
+                    }
+                }
+                Err(error) => ProbeResult {
+                    backend: request.backend,
+                    address: request.address,
+                    request: request.write,
+                    read_len: request.read_len,
+                    response: None,
+                    decoded: None,
+                    error: Some(error.to_string()),
+                },
+            };
+        results.push(result);
+    }
+    DiscoveryReport { results }
 }
 
 pub fn parse_rgb_ex_firmware_response(response: &[u8]) -> io::Result<RgbExFirmwareInfo> {
@@ -107,6 +189,34 @@ pub fn parse_n50_native_response(response: &[u8]) -> io::Result<N50NativeInfo> {
         led_tag,
         full_led_id: n50_full_led_id_for_tag(led_tag),
     })
+}
+
+fn decode_response(backend: BackendKind, response: &[u8]) -> io::Result<String> {
+    match backend {
+        BackendKind::RgbExFirmware => {
+            let info = parse_rgb_ex_firmware_response(response)?;
+            Ok(format!(
+                "RGB Ex firmware version {}, {}",
+                info.version,
+                if info.ex_4n { "Ex-4N" } else { "legacy marker" }
+            ))
+        }
+        BackendKind::RgbExSsid => {
+            let info = parse_rgb_ex_ssid_response(response)?;
+            Ok(format!("RGB Ex SSID 0x{:04x}", info.ssid))
+        }
+        BackendKind::N50Native => {
+            let info = parse_n50_native_response(response)?;
+            let led_id = info
+                .full_led_id
+                .map(|id| format!("0x{id:04x}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(format!(
+                "N50 native firmware {}, tag 0x{:02x}, full LED id {}",
+                info.version, info.led_tag, led_id
+            ))
+        }
+    }
 }
 
 fn n50_full_led_id_for_tag(tag: u8) -> Option<u16> {

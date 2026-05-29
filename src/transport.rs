@@ -38,6 +38,10 @@ pub trait Transport {
             "transport does not implement write_read",
         ))
     }
+
+    fn write_read_at(&self, _addr: u16, payload: &[u8], read_len: usize) -> io::Result<Vec<u8>> {
+        self.write_read(payload, read_len)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -50,8 +54,12 @@ pub struct LinuxI2cTransport {
 
 impl LinuxI2cTransport {
     pub fn new(bus: u8, addr: u16) -> Self {
+        Self::with_path(PathBuf::from(format!("/dev/i2c-{bus}")), addr)
+    }
+
+    pub fn with_path(path: impl Into<PathBuf>, addr: u16) -> Self {
         Self {
-            path: PathBuf::from(format!("/dev/i2c-{bus}")),
+            path: path.into(),
             addr,
             retries: 8,
             retry_delay: Duration::from_millis(250),
@@ -59,11 +67,15 @@ impl LinuxI2cTransport {
     }
 
     fn rdwr(&self, messages: &mut [MessageBuffer]) -> io::Result<Vec<Vec<u8>>> {
+        self.rdwr_at(self.addr, messages)
+    }
+
+    fn rdwr_at(&self, addr: u16, messages: &mut [MessageBuffer]) -> io::Result<Vec<Vec<u8>>> {
         let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let mut ioctl_messages: Vec<I2cMsg> = messages
             .iter_mut()
             .map(|message| I2cMsg {
-                addr: self.addr,
+                addr,
                 flags: message.flags,
                 len: message.buffer.len() as u16,
                 buf: message.buffer.as_mut_ptr(),
@@ -130,18 +142,7 @@ impl Transport for LinuxI2cTransport {
     }
 
     fn write_read(&self, payload: &[u8], read_len: usize) -> io::Result<Vec<u8>> {
-        if payload.len() > I2C_PAGE_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "I2C write payload exceeds one page",
-            ));
-        }
-        if read_len > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "I2C read length exceeds kernel message limit",
-            ));
-        }
+        validate_write_read(payload, read_len)?;
         logging::debug(format!(
             "i2c write-read path={} addr=0x{:02x} write_len={} read_len={} head={}",
             self.path.display(),
@@ -164,6 +165,34 @@ impl Transport for LinuxI2cTransport {
             .map(|buffers| buffers[1].clone())
         })
     }
+
+    fn write_read_at(&self, addr: u16, payload: &[u8], read_len: usize) -> io::Result<Vec<u8>> {
+        validate_write_read(payload, read_len)?;
+        logging::debug(format!(
+            "i2c write-read path={} addr=0x{:02x} write_len={} read_len={} head={}",
+            self.path.display(),
+            addr,
+            payload.len(),
+            read_len,
+            format_head(payload)
+        ));
+        self.retry(|| {
+            self.rdwr_at(
+                addr,
+                &mut [
+                    MessageBuffer {
+                        flags: 0,
+                        buffer: payload.to_vec(),
+                    },
+                    MessageBuffer {
+                        flags: I2C_M_RD,
+                        buffer: vec![0; read_len],
+                    },
+                ],
+            )
+            .map(|buffers| buffers[1].clone())
+        })
+    }
 }
 
 fn format_head(payload: &[u8]) -> String {
@@ -173,4 +202,20 @@ fn format_head(payload: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn validate_write_read(payload: &[u8], read_len: usize) -> io::Result<()> {
+    if payload.len() > I2C_PAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "I2C write payload exceeds one page",
+        ));
+    }
+    if read_len > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "I2C read length exceeds kernel message limit",
+        ));
+    }
+    Ok(())
 }
