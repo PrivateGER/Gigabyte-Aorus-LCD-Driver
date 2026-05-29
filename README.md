@@ -4,6 +4,8 @@ Rust binary that can control the LCD on the Gigabyte GeForce RTX 5080 AORUS
 Master ICE. It may work with other Gigabyte LCD screens, but they can use
 different I2C addresses, device ids, storage offsets, or timing requirements.
 
+<center><img width="1024" height="771" alt="blahaj with GPU stats" src="https://github.com/user-attachments/assets/b2e429de-2743-4591-8662-fecd2c4954f9" /></center>
+
 GIF support is included, but the panel _really_ sucks at handling them. 
 They are very panel-sensitive and can get stuck on Loading if the file is too complex, or the panel simply doesn't feel like it.
 
