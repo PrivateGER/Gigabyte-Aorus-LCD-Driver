@@ -29,6 +29,7 @@ pub(crate) struct RunArgs {
     pub(crate) device_id: u8,
     pub(crate) image_settle_delay: Duration,
     pub(crate) overlay: OverlayConfig,
+    pub(crate) monitoring_enabled: bool,
     pub(crate) gpu_index: u32,
     pub(crate) log_level: LogLevel,
 }
@@ -159,6 +160,12 @@ struct RunCliArgs {
     overlay_interval: u8,
 
     #[arg(
+        long = "no-monitoring",
+        help = "Upload the image or GIF and exit without NVML metric monitoring"
+    )]
+    no_monitoring: bool,
+
+    #[arg(
         long = "gpu-index",
         default_value_t = 0,
         value_parser = parse_u32,
@@ -268,6 +275,7 @@ impl TryFrom<RunCliArgs> for RunArgs {
                 interval: cli.overlay_interval.max(1),
                 flags: cli.metric_flags,
             },
+            monitoring_enabled: !cli.no_monitoring,
             gpu_index: cli.gpu_index,
             log_level: cli.log_level,
         })
@@ -398,6 +406,20 @@ mod tests {
         let args = parse_run(["--mascot", "mascot.png"]);
 
         assert_eq!(args.image_settle_delay, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn metric_monitoring_is_enabled_by_default() {
+        let args = parse_run(["--mascot", "mascot.png"]);
+
+        assert!(args.monitoring_enabled);
+    }
+
+    #[test]
+    fn no_monitoring_flag_disables_metric_monitoring() {
+        let args = parse_run(["--mascot", "mascot.png", "--no-monitoring"]);
+
+        assert!(!args.monitoring_enabled);
     }
 
     #[test]

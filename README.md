@@ -53,6 +53,16 @@ The default is `temp,usage,power`.
 After setup, the service updates values once per
 second.
 
+To upload the selected image or GIF and exit without starting NVML metric
+monitoring, add `--no-monitoring`:
+
+```bash
+target/release/gigabyte-lcd \
+  --mascot blahaj.png \
+  --gif blahaj.gif \
+  --no-monitoring
+```
+
 ## Install User Service
 
 Build the release binary first, install the binary and background image into

@@ -80,6 +80,15 @@ pub fn run_static_overlay_service<T: Transport, S: TelemetrySource>(
     )
 }
 
+pub fn run_display_upload_service<T: Transport>(
+    lcd: &Lcd<'_, T>,
+    upload: DisplayUpload,
+    settle_delay: Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    upload_and_activate_display(lcd, &upload, settle_delay, &mut sleep)
+}
+
 pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
     lcd: &Lcd<'_, T>,
     upload: DisplayUpload,
@@ -88,6 +97,28 @@ pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
     overlay: OverlayConfig,
     value_iterations: usize,
     mut sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    upload_and_activate_display(lcd, &upload, settle_delay, &mut sleep)?;
+
+    logging::info(format!(
+        "enabling metric overlay flags 0x{:02x}, interval {}",
+        overlay.flags, overlay.interval
+    ));
+    lcd.set_metric_overlay(overlay.flags, overlay.interval)?;
+
+    logging::info("entering value refresh loop");
+    for _ in 0..value_iterations {
+        lcd.set_metric_values(telemetry.read()?)?;
+        sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
+fn upload_and_activate_display<T: Transport>(
+    lcd: &Lcd<'_, T>,
+    upload: &DisplayUpload,
+    settle_delay: Duration,
+    sleep: &mut impl FnMut(Duration),
 ) -> io::Result<()> {
     logging::info("opening LCD");
     lcd.open_lcd(true)?;
@@ -101,10 +132,10 @@ pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
         lcd.upload_payload_with_options_and_sleeper(
             reset_payload,
             UploadOptions::image(),
-            &mut sleep,
+            &mut *sleep,
         )?;
         logging::info("setting Image reset mode");
-        lcd.apply_mode_cleanly(DisplayMode::Image, &mut sleep)?;
+        lcd.apply_mode_cleanly(DisplayMode::Image, &mut *sleep)?;
         logging::info("enabling Image reset template");
         lcd.set_image_template(TemplateKind::Image, true)?;
     }
@@ -121,7 +152,7 @@ pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
         upload.options.frame_count,
         upload.options.delay_ms
     ));
-    lcd.upload_payload_with_options_and_sleeper(&upload.payload, upload.options, &mut sleep)?;
+    lcd.upload_payload_with_options_and_sleeper(&upload.payload, upload.options, &mut *sleep)?;
     logging::info(format!(
         "upload finished; settling for {}s",
         settle_delay.as_secs()
@@ -134,22 +165,11 @@ pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
         lcd.set_mode(DisplayMode::Gif)?;
     } else {
         logging::info(format!("setting {:?} mode", upload.mode));
-        lcd.apply_mode_cleanly(upload.mode, &mut sleep)?;
+        lcd.apply_mode_cleanly(upload.mode, &mut *sleep)?;
         if let Some(template_kind) = template_kind_for_mode(upload.mode) {
             logging::info(format!("enabling {:?} image template", template_kind));
             lcd.set_image_template(template_kind, true)?;
         }
-    }
-    logging::info(format!(
-        "enabling metric overlay flags 0x{:02x}, interval {}",
-        overlay.flags, overlay.interval
-    ));
-    lcd.set_metric_overlay(overlay.flags, overlay.interval)?;
-
-    logging::info("entering value refresh loop");
-    for _ in 0..value_iterations {
-        lcd.set_metric_values(telemetry.read()?)?;
-        sleep(Duration::from_secs(1));
     }
     Ok(())
 }
@@ -186,6 +206,14 @@ pub fn run_display_overlay_loop<T: Transport, S: TelemetrySource>(
         usize::MAX,
         thread::sleep,
     )
+}
+
+pub fn run_display_upload_once<T: Transport>(
+    lcd: &Lcd<'_, T>,
+    upload: DisplayUpload,
+    settle_delay: Duration,
+) -> io::Result<()> {
+    run_display_upload_service(lcd, upload, settle_delay, thread::sleep)
 }
 
 fn template_kind_for_mode(mode: DisplayMode) -> Option<TemplateKind> {

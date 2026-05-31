@@ -2,7 +2,7 @@ use gigabyte_lcd::device::Lcd;
 use gigabyte_lcd::protocol::MetricValues;
 use gigabyte_lcd::service::{
     DisplayUpload, OverlayConfig, TelemetrySource, run_display_overlay_service,
-    run_static_overlay_service,
+    run_display_upload_service, run_static_overlay_service,
 };
 use gigabyte_lcd::transport::Transport;
 use std::cell::RefCell;
@@ -120,6 +120,82 @@ fn service_sets_overlay_once_then_only_feeds_values() {
         writes
             .iter()
             .any(|packet| packet[0] == 0xf1 && packet[9] == 1)
+    );
+}
+
+#[test]
+fn upload_service_sets_image_and_exits_without_metric_monitoring() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+
+    run_display_upload_service(
+        &lcd,
+        DisplayUpload::image(vec![0; 12]),
+        Duration::ZERO,
+        |_| {},
+    )
+    .unwrap();
+
+    let writes = transport.writes.borrow();
+    assert!(
+        writes
+            .iter()
+            .any(|packet| packet[0] == 0xf1 && packet[9] == 1),
+        "image upload header should be sent"
+    );
+    assert!(
+        writes
+            .iter()
+            .any(|packet| packet[0] == 0xe5 && packet[5] == 4),
+        "image mode should be selected"
+    );
+    assert!(
+        writes.iter().all(|packet| packet[0] != 0xe3),
+        "metric values should not be sent"
+    );
+    assert!(
+        writes
+            .iter()
+            .filter(|packet| packet[0] == 0xe1)
+            .all(|packet| packet[5..13].iter().all(|value| *value == 0)),
+        "metric overlay should only be cleared, never enabled"
+    );
+}
+
+#[test]
+fn upload_service_sets_gif_and_exits_without_metric_monitoring() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+
+    run_display_upload_service(
+        &lcd,
+        DisplayUpload::gif(vec![0; 12], 3, 50),
+        Duration::ZERO,
+        |_| {},
+    )
+    .unwrap();
+
+    let writes = transport.writes.borrow();
+    let header = writes.iter().find(|packet| packet[0] == 0xf1).unwrap();
+    assert_eq!(header[9], 2);
+    assert_eq!(&header[14..16], &3u16.to_be_bytes());
+    assert_eq!(header[16], 50);
+    assert!(
+        writes
+            .iter()
+            .any(|packet| packet[0] == 0xe5 && packet[5] == 6),
+        "gif mode should be selected"
+    );
+    assert!(
+        writes.iter().all(|packet| packet[0] != 0xe3),
+        "metric values should not be sent"
+    );
+    assert!(
+        writes
+            .iter()
+            .filter(|packet| packet[0] == 0xe1)
+            .all(|packet| packet[5..13].iter().all(|value| *value == 0)),
+        "metric overlay should only be cleared, never enabled"
     );
 }
 

@@ -6,7 +6,7 @@ use gigabyte_lcd::gif::gif_payload_from_path;
 use gigabyte_lcd::image::{mascot_background_from_path, single_frame_payload};
 use gigabyte_lcd::logging;
 use gigabyte_lcd::rgb_discovery::run_rgb_discovery;
-use gigabyte_lcd::service::{DisplayUpload, run_display_overlay_loop};
+use gigabyte_lcd::service::{DisplayUpload, run_display_overlay_loop, run_display_upload_once};
 use gigabyte_lcd::telemetry::NvmlTelemetry;
 use gigabyte_lcd::transport::LinuxI2cTransport;
 use std::io;
@@ -32,6 +32,10 @@ fn run_lcd_service(args: RunArgs) -> io::Result<()> {
     };
     let transport = LinuxI2cTransport::new(args.bus, args.addr);
     let lcd = Lcd::new(&transport, args.device_id);
+    if !args.monitoring_enabled {
+        return run_display_upload_once(&lcd, upload, args.image_settle_delay);
+    }
+
     let telemetry = NvmlTelemetry::open(args.gpu_index)?;
 
     run_display_overlay_loop(
