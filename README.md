@@ -9,6 +9,10 @@ different I2C addresses, device ids, storage offsets, or timing requirements.
 GIF support is included, but the panel _really_ sucks at handling them. 
 They are very panel-sensitive and can get stuck on Loading if the file is too complex, or the panel simply doesn't feel like it.
 
+In some games, in some cases, the metric display switching seems to cause micro-stutters (~20ms spikes) whenever the display updates. I sometimes experience the same with the Windows driver, so I wonder if this is just fundamental to how the card LCD works. 
+
+It does *not* occur when using a static image. More data needed, if you can tell me about your experience that'd be very helpful.
+
 ## Requirements
 
 - Linux with access to the GPU LCD I2C adapter.
