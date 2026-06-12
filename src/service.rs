@@ -1,17 +1,29 @@
 use crate::device::{Lcd, UploadOptions};
 use crate::logging;
-use crate::protocol::{DisplayMode, MetricValues, TemplateKind};
+use crate::protocol::{
+    DisplayMode, METRIC_FLAG_FAN, METRIC_FLAG_FPS, METRIC_FLAG_GPU_CLOCK, METRIC_FLAG_GPU_USAGE,
+    METRIC_FLAG_MEMORY_CLOCK, METRIC_FLAG_MEMORY_USAGE, METRIC_FLAG_POWER, METRIC_FLAG_TEMPERATURE,
+    MetricValues, TemplateKind,
+};
 use crate::transport::Transport;
 use std::io;
 use std::thread;
 use std::time::Duration;
 
-pub const DEFAULT_LCD_INTERVAL_OVERLAY_FLAGS: u8 = (1 << 0) | (1 << 2) | (1 << 7);
+pub const DEFAULT_LCD_INTERVAL_OVERLAY_FLAGS: u8 =
+    METRIC_FLAG_TEMPERATURE | METRIC_FLAG_GPU_USAGE | METRIC_FLAG_POWER;
+
+/// Every panel write stalls the GPU for the bus transaction (~6 ms at
+/// 400 kHz), so stale-but-equal values are not re-sent. This cap bounds how
+/// long the panel can display outdated values if it lost a write (e.g. a
+/// panel reset between transactions).
+pub const METRIC_FORCE_RESEND_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OverlayConfig {
     pub flags: u8,
     pub interval: u8,
+    pub update_interval: Duration,
 }
 
 impl Default for OverlayConfig {
@@ -19,8 +31,84 @@ impl Default for OverlayConfig {
         Self {
             flags: DEFAULT_LCD_INTERVAL_OVERLAY_FLAGS,
             interval: 4,
+            update_interval: Duration::from_secs(1),
         }
     }
+}
+
+/// Decides whether a fresh telemetry sample is worth an I2C transaction.
+///
+/// A sample is sent when a metric that the overlay actually displays moved by
+/// at least its display-noise threshold relative to the *last sent* sample
+/// (so slow drift accumulates until it crosses the threshold), or when
+/// `force_resend_after` has elapsed since the last write.
+pub struct MetricChangeDetector {
+    overlay_flags: u8,
+    force_resend_after: Duration,
+    last_sent: Option<MetricValues>,
+    since_last_send: Duration,
+}
+
+impl MetricChangeDetector {
+    pub fn new(overlay_flags: u8, force_resend_after: Duration) -> Self {
+        Self {
+            overlay_flags,
+            force_resend_after,
+            last_sent: None,
+            since_last_send: Duration::ZERO,
+        }
+    }
+
+    /// Records a telemetry sample and returns whether it should be written to
+    /// the panel. `elapsed` is the logical tick duration of the caller's loop
+    /// (the configured update interval), matching the injected-sleep model
+    /// the service uses; the staleness cap is therefore tracked in logical
+    /// time and may run one transaction duration behind wall clock.
+    pub fn observe(&mut self, values: MetricValues, elapsed: Duration) -> bool {
+        self.since_last_send = self.since_last_send.saturating_add(elapsed);
+        let send = match &self.last_sent {
+            None => true,
+            Some(last_sent) => {
+                self.since_last_send >= self.force_resend_after
+                    || displayed_metrics_changed(self.overlay_flags, last_sent, &values)
+            }
+        };
+        if send {
+            self.last_sent = Some(values);
+            self.since_last_send = Duration::ZERO;
+        }
+        send
+    }
+}
+
+fn displayed_metrics_changed(flags: u8, last: &MetricValues, new: &MetricValues) -> bool {
+    // Thresholds sit just above per-second sensor jitter; anything smaller is
+    // unreadable on the panel while it rotates metrics every few seconds.
+    // Temperature needs >=2 so a reading oscillating across one degree
+    // (26<->27) does not trigger a bus write on every flip.
+    const TEMPERATURE_C: u16 = 2;
+    const GPU_CLOCK_MHZ: u32 = 15;
+    const GPU_USAGE_PERCENT: u16 = 2;
+    const FAN_RPM: u32 = 50;
+    const MEMORY_CLOCK_MHZ: u32 = 15;
+    const MEMORY_USAGE_PERCENT: u16 = 2;
+    const POWER_WATTS: u32 = 3;
+
+    let displayed = |flag: u8| flags & flag != 0;
+    (displayed(METRIC_FLAG_TEMPERATURE)
+        && new.temperature_c.abs_diff(last.temperature_c) >= TEMPERATURE_C)
+        || (displayed(METRIC_FLAG_GPU_CLOCK)
+            && new.gpu_clock_mhz.abs_diff(last.gpu_clock_mhz) >= GPU_CLOCK_MHZ)
+        || (displayed(METRIC_FLAG_GPU_USAGE)
+            && new.gpu_usage_percent.abs_diff(last.gpu_usage_percent) >= GPU_USAGE_PERCENT)
+        || (displayed(METRIC_FLAG_FAN) && new.fan_rpm.abs_diff(last.fan_rpm) >= FAN_RPM)
+        || (displayed(METRIC_FLAG_MEMORY_CLOCK)
+            && new.memory_clock_mhz.abs_diff(last.memory_clock_mhz) >= MEMORY_CLOCK_MHZ)
+        || (displayed(METRIC_FLAG_MEMORY_USAGE)
+            && new.memory_usage_percent.abs_diff(last.memory_usage_percent) >= MEMORY_USAGE_PERCENT)
+        || (displayed(METRIC_FLAG_FPS) && new.fps != last.fps)
+        || (displayed(METRIC_FLAG_POWER)
+            && new.power_watts.abs_diff(last.power_watts) >= POWER_WATTS)
 }
 
 pub trait TelemetrySource {
@@ -107,9 +195,13 @@ pub fn run_display_overlay_service<T: Transport, S: TelemetrySource>(
     lcd.set_metric_overlay(overlay.flags, overlay.interval)?;
 
     logging::info("entering value refresh loop");
+    let mut detector = MetricChangeDetector::new(overlay.flags, METRIC_FORCE_RESEND_AFTER);
     for _ in 0..value_iterations {
-        lcd.set_metric_values(telemetry.read()?)?;
-        sleep(Duration::from_secs(1));
+        let values = telemetry.read()?;
+        if detector.observe(values, overlay.update_interval) {
+            lcd.set_metric_values(values)?;
+        }
+        sleep(overlay.update_interval);
     }
     Ok(())
 }

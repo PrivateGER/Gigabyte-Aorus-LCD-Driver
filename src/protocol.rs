@@ -36,6 +36,17 @@ pub enum TemplateKind {
     Pet = 3,
 }
 
+/// Bit positions in the 0xE1 metric overlay flags, matching the value order
+/// of the 0xE3 metric values packet.
+pub const METRIC_FLAG_TEMPERATURE: u8 = 1 << 0;
+pub const METRIC_FLAG_GPU_CLOCK: u8 = 1 << 1;
+pub const METRIC_FLAG_GPU_USAGE: u8 = 1 << 2;
+pub const METRIC_FLAG_FAN: u8 = 1 << 3;
+pub const METRIC_FLAG_MEMORY_CLOCK: u8 = 1 << 4;
+pub const METRIC_FLAG_MEMORY_USAGE: u8 = 1 << 5;
+pub const METRIC_FLAG_FPS: u8 = 1 << 6;
+pub const METRIC_FLAG_POWER: u8 = 1 << 7;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MetricValues {
     pub temperature_c: u16,

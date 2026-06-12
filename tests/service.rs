@@ -1,8 +1,8 @@
 use gigabyte_lcd::device::Lcd;
 use gigabyte_lcd::protocol::MetricValues;
 use gigabyte_lcd::service::{
-    DisplayUpload, OverlayConfig, TelemetrySource, run_display_overlay_service,
-    run_display_upload_service, run_static_overlay_service,
+    DisplayUpload, MetricChangeDetector, OverlayConfig, TelemetrySource,
+    run_display_overlay_service, run_display_upload_service, run_static_overlay_service,
 };
 use gigabyte_lcd::transport::Transport;
 use std::cell::RefCell;
@@ -30,6 +30,29 @@ impl TelemetrySource for StaticTelemetry {
     fn read(&mut self) -> io::Result<MetricValues> {
         Ok(self.values)
     }
+}
+
+struct SequenceTelemetry {
+    values: Vec<MetricValues>,
+    index: usize,
+}
+
+impl SequenceTelemetry {
+    fn new(values: Vec<MetricValues>) -> Self {
+        Self { values, index: 0 }
+    }
+}
+
+impl TelemetrySource for SequenceTelemetry {
+    fn read(&mut self) -> io::Result<MetricValues> {
+        let values = self.values[self.index.min(self.values.len() - 1)];
+        self.index += 1;
+        Ok(values)
+    }
+}
+
+fn count_value_packets(writes: &[Vec<u8>]) -> usize {
+    writes.iter().filter(|packet| packet[0] == 0xe3).count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +97,7 @@ fn upload_waits_before_start_command_like_gcc() {
 }
 
 #[test]
-fn service_sets_overlay_once_then_only_feeds_values() {
+fn service_sets_overlay_once_then_feeds_values_only_when_they_change() {
     let transport = RecordingTransport::default();
     let lcd = Lcd::new(&transport, 0x21);
     let telemetry = StaticTelemetry {
@@ -104,10 +127,13 @@ fn service_sets_overlay_once_then_only_feeds_values() {
         .iter()
         .filter(|packet| packet[0] == 0xe1 && packet[5] == 1 && packet[7] == 1 && packet[12] == 1)
         .count();
-    let value_count = opcodes.iter().filter(|opcode| **opcode == 0xe3).count();
 
     assert_eq!(overlay_selection_count, 1);
-    assert_eq!(value_count, 3);
+    assert_eq!(
+        count_value_packets(&writes),
+        1,
+        "identical metric samples should be written once, not re-sent every tick"
+    );
     assert!(
         opcodes.iter().position(|opcode| *opcode == 0xe1).unwrap()
             < opcodes.iter().position(|opcode| *opcode == 0xe3).unwrap()
@@ -121,6 +147,144 @@ fn service_sets_overlay_once_then_only_feeds_values() {
             .iter()
             .any(|packet| packet[0] == 0xf1 && packet[9] == 1)
     );
+}
+
+#[test]
+fn service_resends_values_when_a_displayed_metric_changes() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+    // 48 -> 49 is one-degree boundary flapping (skipped); 50 is 2 degrees
+    // from the last written sample and must be sent.
+    let telemetry = SequenceTelemetry::new(vec![
+        MetricValues {
+            temperature_c: 48,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            temperature_c: 49,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            temperature_c: 50,
+            ..MetricValues::default()
+        },
+    ]);
+
+    run_static_overlay_service(
+        &lcd,
+        &[0; 12],
+        telemetry,
+        Duration::ZERO,
+        OverlayConfig::default(),
+        3,
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(count_value_packets(&transport.writes.borrow()), 2);
+}
+
+#[test]
+fn service_ignores_jitter_on_metrics_the_overlay_does_not_display() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+    // Default overlay flags show temp/usage/power; clock and fan jitter must
+    // not cause panel writes.
+    let telemetry = SequenceTelemetry::new(vec![
+        MetricValues {
+            gpu_clock_mhz: 2400,
+            fan_rpm: 1200,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            gpu_clock_mhz: 2750,
+            fan_rpm: 1480,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            gpu_clock_mhz: 2100,
+            fan_rpm: 900,
+            ..MetricValues::default()
+        },
+    ]);
+
+    run_static_overlay_service(
+        &lcd,
+        &[0; 12],
+        telemetry,
+        Duration::ZERO,
+        OverlayConfig::default(),
+        3,
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(count_value_packets(&transport.writes.borrow()), 1);
+}
+
+#[test]
+fn service_skips_sub_threshold_power_jitter_but_sends_accumulated_drift() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+    // 211 -> 212 is below the 3 W threshold against the last *sent* value;
+    // 214 is 3 W away from 211 and must be written even though each single
+    // step was small.
+    let telemetry = SequenceTelemetry::new(vec![
+        MetricValues {
+            power_watts: 211,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            power_watts: 212,
+            ..MetricValues::default()
+        },
+        MetricValues {
+            power_watts: 214,
+            ..MetricValues::default()
+        },
+    ]);
+
+    run_static_overlay_service(
+        &lcd,
+        &[0; 12],
+        telemetry,
+        Duration::ZERO,
+        OverlayConfig::default(),
+        3,
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(count_value_packets(&transport.writes.borrow()), 2);
+}
+
+#[test]
+fn service_force_resends_stable_values_after_the_staleness_cap() {
+    let transport = RecordingTransport::default();
+    let lcd = Lcd::new(&transport, 0x21);
+    let telemetry = StaticTelemetry {
+        values: MetricValues {
+            temperature_c: 48,
+            ..MetricValues::default()
+        },
+    };
+
+    // 20 s ticks: send at tick 1, skip at +20 s, force-resend at +40 s (>= 30 s cap).
+    run_static_overlay_service(
+        &lcd,
+        &[0; 12],
+        telemetry,
+        Duration::ZERO,
+        OverlayConfig {
+            update_interval: Duration::from_secs(20),
+            ..OverlayConfig::default()
+        },
+        3,
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(count_value_packets(&transport.writes.borrow()), 2);
 }
 
 #[test]
@@ -318,6 +482,67 @@ fn gif_service_can_upload_static_image_reset_before_real_gif() {
 }
 
 #[test]
+fn detector_sends_first_sample_even_with_no_displayed_metrics() {
+    let mut detector = MetricChangeDetector::new(0, Duration::from_secs(30));
+
+    assert!(detector.observe(MetricValues::default(), Duration::from_secs(1)));
+    assert!(
+        !detector.observe(
+            MetricValues {
+                temperature_c: 99,
+                power_watts: 500,
+                ..MetricValues::default()
+            },
+            Duration::from_secs(1),
+        ),
+        "with no metrics displayed, value changes must not trigger writes"
+    );
+}
+
+#[test]
+fn detector_treats_thresholds_as_inclusive_and_handles_wraparound_diffs() {
+    let flags = u8::MAX;
+    let mut detector = MetricChangeDetector::new(flags, Duration::from_secs(3600));
+    assert!(detector.observe(
+        MetricValues {
+            gpu_usage_percent: 100,
+            ..MetricValues::default()
+        },
+        Duration::ZERO,
+    ));
+
+    // 1 pp below threshold: skip; drop from 100 to 0 (adversarial direction): send.
+    assert!(!detector.observe(
+        MetricValues {
+            gpu_usage_percent: 99,
+            ..MetricValues::default()
+        },
+        Duration::ZERO,
+    ));
+    assert!(detector.observe(MetricValues::default(), Duration::ZERO));
+
+    // Exactly at the 2 pp threshold (0 -> 2) must send: >= is inclusive.
+    assert!(detector.observe(
+        MetricValues {
+            gpu_usage_percent: 2,
+            ..MetricValues::default()
+        },
+        Duration::ZERO,
+    ));
+}
+
+#[test]
+fn detector_force_resend_fires_at_exactly_the_staleness_cap() {
+    let cap = Duration::from_secs(30);
+    let mut detector = MetricChangeDetector::new(0, cap);
+    assert!(detector.observe(MetricValues::default(), Duration::ZERO));
+
+    // One second short of the cap: skip; reaching exactly the cap: send.
+    assert!(!detector.observe(MetricValues::default(), cap - Duration::from_secs(1)));
+    assert!(detector.observe(MetricValues::default(), Duration::from_secs(1)));
+}
+
+#[test]
 fn service_uses_selected_metric_overlay_flags() {
     let transport = RecordingTransport::default();
     let lcd = Lcd::new(&transport, 0x21);
@@ -332,7 +557,11 @@ fn service_uses_selected_metric_overlay_flags() {
         &payload,
         telemetry,
         Duration::ZERO,
-        OverlayConfig { flags, interval: 7 },
+        OverlayConfig {
+            flags,
+            interval: 7,
+            ..OverlayConfig::default()
+        },
         1,
         |_| {},
     )

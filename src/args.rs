@@ -190,6 +190,15 @@ struct RunCliArgs {
     overlay_interval: u8,
 
     #[arg(
+        long = "update-interval",
+        default_value_t = 1,
+        value_parser = parse_update_interval,
+        value_name = "SEC",
+        help = "Seconds between metric refresh checks (1-3600)"
+    )]
+    update_interval: u64,
+
+    #[arg(
         long = "no-monitoring",
         help = "Upload the image or GIF and exit without NVML metric monitoring"
     )]
@@ -306,6 +315,7 @@ impl TryFrom<RunCliArgs> for RunArgs {
             overlay: OverlayConfig {
                 interval: cli.overlay_interval.max(1),
                 flags: cli.metric_flags,
+                update_interval: Duration::from_secs(cli.update_interval),
             },
             monitoring_enabled: !cli.no_monitoring,
             gpu_index: cli.gpu_index,
@@ -357,6 +367,16 @@ fn parse_gif_max_frames(value: &str) -> Result<usize, String> {
     Ok(max_frames)
 }
 
+fn parse_update_interval(value: &str) -> Result<u64, String> {
+    let seconds: u64 = value
+        .parse()
+        .map_err(|_| format!("invalid --update-interval: {value:?}"))?;
+    if !(1..=3600).contains(&seconds) {
+        return Err("--update-interval must be between 1 and 3600 seconds".to_string());
+    }
+    Ok(seconds)
+}
+
 fn parse_i2c_speed(value: &str) -> Result<u16, String> {
     let khz = parse_u16(value)?;
     if I2cSpeed::from_khz(khz).is_none() {
@@ -406,22 +426,34 @@ fn parse_log_level(value: &str) -> Result<LogLevel, String> {
 }
 
 fn parse_metric_flags(value: &str) -> Result<u8, String> {
+    use gigabyte_lcd::protocol::{
+        METRIC_FLAG_FAN, METRIC_FLAG_GPU_CLOCK, METRIC_FLAG_GPU_USAGE, METRIC_FLAG_MEMORY_CLOCK,
+        METRIC_FLAG_MEMORY_USAGE, METRIC_FLAG_POWER, METRIC_FLAG_TEMPERATURE,
+    };
     let mut flags = 0u8;
     for raw_name in value.split(',') {
         let name = raw_name.trim().to_ascii_lowercase();
         if name.is_empty() {
             continue;
         }
-        let bit = match name.as_str() {
-            "temp" | "temperature" | "gpu-temp" | "gpu-temperature" => 0,
-            "clock" | "gpu-clock" => 1,
-            "usage" | "gpu" | "gpu-usage" => 2,
-            "fan" | "fan-speed" => 3,
-            "vram-clock" | "memory-clock" | "mem-clock" => 4,
-            "vram" | "vram-usage" | "memory" | "memory-usage" | "mem" | "mem-usage" => 5,
-            "power" | "pwr" | "tgp" => 7,
+        let flag = match name.as_str() {
+            "temp" | "temperature" | "gpu-temp" | "gpu-temperature" => METRIC_FLAG_TEMPERATURE,
+            "clock" | "gpu-clock" => METRIC_FLAG_GPU_CLOCK,
+            "usage" | "gpu" | "gpu-usage" => METRIC_FLAG_GPU_USAGE,
+            "fan" | "fan-speed" => METRIC_FLAG_FAN,
+            "vram-clock" | "memory-clock" | "mem-clock" => METRIC_FLAG_MEMORY_CLOCK,
+            "vram" | "vram-usage" | "memory" | "memory-usage" | "mem" | "mem-usage" => {
+                METRIC_FLAG_MEMORY_USAGE
+            }
+            "power" | "pwr" | "tgp" => METRIC_FLAG_POWER,
             "all" => {
-                flags = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7);
+                flags = METRIC_FLAG_TEMPERATURE
+                    | METRIC_FLAG_GPU_CLOCK
+                    | METRIC_FLAG_GPU_USAGE
+                    | METRIC_FLAG_FAN
+                    | METRIC_FLAG_MEMORY_CLOCK
+                    | METRIC_FLAG_MEMORY_USAGE
+                    | METRIC_FLAG_POWER;
                 continue;
             }
             "none" | "off" => {
@@ -431,7 +463,7 @@ fn parse_metric_flags(value: &str) -> Result<u8, String> {
             "fps" => return Err(format!("unsupported metric {raw_name:?}")),
             _ => return Err(format!("unknown metric {raw_name:?}")),
         };
-        flags |= 1 << bit;
+        flags |= flag;
     }
     Ok(flags)
 }
@@ -631,6 +663,42 @@ mod tests {
 
         assert_eq!(args.transport, TransportKind::I2cDev);
         assert_eq!(args.i2c_speed, I2cSpeed::Khz100);
+    }
+
+    #[test]
+    fn defaults_to_one_second_update_interval() {
+        let args = parse_run(["--mascot", "mascot.png"]);
+
+        assert_eq!(args.overlay.update_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn parses_custom_update_interval() {
+        let args = parse_run(["--mascot", "mascot.png", "--update-interval", "5"]);
+
+        assert_eq!(args.overlay.update_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_update_intervals() {
+        // "-1" is rejected upstream by clap's hyphen handling, so it only
+        // gets the generic kind check.
+        for bad in ["0", "3601", "-1", "1.5"] {
+            let error = Args::parse(
+                ["--mascot", "mascot.png", "--update-interval", bad]
+                    .into_iter()
+                    .map(String::from),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "input {bad:?}");
+            if bad != "-1" {
+                assert!(
+                    error.to_string().contains("--update-interval"),
+                    "input {bad:?}"
+                );
+            }
+        }
     }
 
     #[test]

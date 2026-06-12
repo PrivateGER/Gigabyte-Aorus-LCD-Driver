@@ -35,6 +35,13 @@ resource manager directly (`/dev/nvidiactl`) and issues I2C transactions at
 The RM transport resolves the GPU and port automatically from the `--bus`
 number via the sysfs adapter name, so multi-GPU systems keep working.
 
+On top of the faster bus, the service skips metric writes entirely when no
+displayed value has changed beyond display noise (2 °C, 2 pp usage, 3 W,
+15 MHz, 50 RPM) relative to the last written sample — something the Windows
+client never does. Stable values are force-refreshed every 30 s as a
+staleness guard. `--update-interval SEC` (default 1) stretches the
+check cadence further if desired.
+
 Tested hardware:
 
 ```text
