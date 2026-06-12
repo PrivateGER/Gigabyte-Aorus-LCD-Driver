@@ -19,7 +19,7 @@ They are very panel-sensitive and can get stuck on Loading if the file is too co
 
 Going through `/dev/i2c-N` clocks the GPU I2C bus at a fixed 100 kHz and the
 NVIDIA driver holds its global GPU locks for the whole transfer, so every
-256-byte panel page stalls frame presentation for ~27 ms — a visible hitch
+256-byte panel page stalls frame presentation for ~27 ms, causing a visible hitch
 once per second while the metric overlay updates. The Windows driver avoids
 this by requesting 400 kHz per transaction through NVAPI.
 
@@ -37,10 +37,12 @@ number via the sysfs adapter name, so multi-GPU systems keep working.
 
 On top of the faster bus, the service skips metric writes entirely when no
 displayed value has changed beyond display noise (2 °C, 2 pp usage, 3 W,
-15 MHz, 50 RPM) relative to the last written sample — something the Windows
-client never does. Stable values are force-refreshed every 30 s as a
+15 MHz, 50 RPM) relative to the last written sample, which the Windows
+client does not do. Stable values are force-refreshed every 30 s as a
 staleness guard. `--update-interval SEC` (default 1) stretches the
 check cadence further if desired.
+
+There *is still a hitch* with all these tweaks, but this is also the case on Windows and lasts <8ms per.
 
 Tested hardware:
 
