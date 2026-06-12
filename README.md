@@ -10,9 +10,30 @@ They are very panel-sensitive and can get stuck on Loading if the file is too co
 ## Requirements
 
 - Linux with access to the GPU LCD I2C adapter.
-- Permission to open `/dev/i2c-1`.
+- Permission to open `/dev/nvidiactl` and `/dev/nvidia*` (default transport),
+  or `/dev/i2c-1` for the fallback transport.
 - NVIDIA NVML available from the installed driver.
 - Rust toolchain if building from source.
+
+## I2C Transport And Frametime Hitches
+
+Going through `/dev/i2c-N` clocks the GPU I2C bus at a fixed 100 kHz and the
+NVIDIA driver holds its global GPU locks for the whole transfer, so every
+256-byte panel page stalls frame presentation for ~27 ms — a visible hitch
+once per second while the metric overlay updates. The Windows driver avoids
+this by requesting 400 kHz per transaction through NVAPI.
+
+This service does the same on Linux: by default it talks to the NVIDIA
+resource manager directly (`/dev/nvidiactl`) and issues I2C transactions at
+400 kHz, cutting the stall to roughly a quarter. Control it with:
+
+```text
+--transport auto|rm|i2c-dev       default: auto (RM, falling back to i2c-dev)
+--i2c-speed-khz 100|200|300|400   default: 400 (RM transport only)
+```
+
+The RM transport resolves the GPU and port automatically from the `--bus`
+number via the sysfs adapter name, so multi-GPU systems keep working.
 
 Tested hardware:
 

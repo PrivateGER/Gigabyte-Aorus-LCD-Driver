@@ -8,6 +8,7 @@ use gigabyte_lcd::protocol::DEFAULT_BUS;
 use gigabyte_lcd::rgb_discovery::{
     N50_NATIVE_LINUX_ADDR_CANDIDATE, ProbeAddresses, RGB_EX_LINUX_ADDR_CANDIDATE,
 };
+use gigabyte_lcd::rmapi::I2cSpeed;
 use gigabyte_lcd::service::OverlayConfig;
 use std::io;
 use std::path::PathBuf;
@@ -19,6 +20,16 @@ pub(crate) enum Args {
     ProbeRgb(ProbeRgbArgs),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum TransportKind {
+    /// Try the NVIDIA RM API transport, fall back to i2c-dev
+    Auto,
+    /// NVIDIA RM API transport (configurable speed, no frametime hitches)
+    Rm,
+    /// Plain /dev/i2c-N transport (fixed 100 kHz)
+    I2cDev,
+}
+
 #[derive(Debug)]
 pub(crate) struct RunArgs {
     pub(crate) mascot: PathBuf,
@@ -27,6 +38,8 @@ pub(crate) struct RunArgs {
     pub(crate) bus: u8,
     pub(crate) addr: u16,
     pub(crate) device_id: u8,
+    pub(crate) transport: TransportKind,
+    pub(crate) i2c_speed: I2cSpeed,
     pub(crate) image_settle_delay: Duration,
     pub(crate) overlay: OverlayConfig,
     pub(crate) monitoring_enabled: bool,
@@ -131,6 +144,23 @@ struct RunCliArgs {
         help = "LCD device LED id"
     )]
     device_id: u8,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = TransportKind::Auto,
+        help = "I2C transport backend"
+    )]
+    transport: TransportKind,
+
+    #[arg(
+        long = "i2c-speed-khz",
+        default_value_t = 400,
+        value_parser = parse_i2c_speed,
+        value_name = "KHZ",
+        help = "RM transport bus speed: 100, 200, 300, or 400"
+    )]
+    i2c_speed_khz: u16,
 
     #[arg(
         long = "image-settle-delay",
@@ -270,6 +300,8 @@ impl TryFrom<RunCliArgs> for RunArgs {
             bus: cli.bus,
             addr: cli.addr,
             device_id: cli.device_id,
+            transport: cli.transport,
+            i2c_speed: I2cSpeed::from_khz(cli.i2c_speed_khz).ok_or_else(invalid_speed_error)?,
             image_settle_delay: cli.image_settle_delay,
             overlay: OverlayConfig {
                 interval: cli.overlay_interval.max(1),
@@ -295,6 +327,13 @@ impl From<ProbeRgbCliArgs> for ProbeRgbArgs {
     }
 }
 
+fn invalid_speed_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "--i2c-speed-khz must be 100, 200, 300, or 400",
+    )
+}
+
 fn missing_mascot_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -316,6 +355,14 @@ fn parse_gif_max_frames(value: &str) -> Result<usize, String> {
         ));
     }
     Ok(max_frames)
+}
+
+fn parse_i2c_speed(value: &str) -> Result<u16, String> {
+    let khz = parse_u16(value)?;
+    if I2cSpeed::from_khz(khz).is_none() {
+        return Err("--i2c-speed-khz must be 100, 200, 300, or 400".to_string());
+    }
+    Ok(khz)
 }
 
 fn parse_u8(value: &str) -> Result<u8, String> {
@@ -561,6 +608,42 @@ mod tests {
         let error = result.unwrap().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("finite"));
+    }
+
+    #[test]
+    fn defaults_to_auto_transport_at_400_khz() {
+        let args = parse_run(["--mascot", "mascot.png"]);
+
+        assert_eq!(args.transport, TransportKind::Auto);
+        assert_eq!(args.i2c_speed, I2cSpeed::Khz400);
+    }
+
+    #[test]
+    fn parses_explicit_transport_and_speed() {
+        let args = parse_run([
+            "--mascot",
+            "mascot.png",
+            "--transport",
+            "i2c-dev",
+            "--i2c-speed-khz",
+            "100",
+        ]);
+
+        assert_eq!(args.transport, TransportKind::I2cDev);
+        assert_eq!(args.i2c_speed, I2cSpeed::Khz100);
+    }
+
+    #[test]
+    fn rejects_unsupported_i2c_speed() {
+        let error = Args::parse(
+            ["--mascot", "mascot.png", "--i2c-speed-khz", "150"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--i2c-speed-khz"));
     }
 
     #[test]

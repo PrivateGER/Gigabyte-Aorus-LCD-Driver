@@ -5,6 +5,7 @@ pub mod logging;
 pub mod protocol;
 pub mod rgb_discovery;
 pub mod rgb_protocol;
+pub mod rmapi;
 pub mod service;
 pub mod telemetry;
 pub mod transport;

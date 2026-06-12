@@ -1,5 +1,6 @@
 use crate::logging;
 use crate::protocol::I2C_PAGE_SIZE;
+use crate::rmapi::NvRmI2cTransport;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -195,7 +196,37 @@ impl Transport for LinuxI2cTransport {
     }
 }
 
-fn format_head(payload: &[u8]) -> String {
+/// Runtime-selected transport: the RM API path (configurable bus speed, used
+/// by default to avoid frametime hitches) or the plain i2c-dev fallback.
+pub enum AnyTransport {
+    I2cDev(LinuxI2cTransport),
+    Rm(NvRmI2cTransport),
+}
+
+impl Transport for AnyTransport {
+    fn write(&self, payload: &[u8]) -> io::Result<()> {
+        match self {
+            Self::I2cDev(transport) => transport.write(payload),
+            Self::Rm(transport) => transport.write(payload),
+        }
+    }
+
+    fn write_read(&self, payload: &[u8], read_len: usize) -> io::Result<Vec<u8>> {
+        match self {
+            Self::I2cDev(transport) => transport.write_read(payload, read_len),
+            Self::Rm(transport) => transport.write_read(payload, read_len),
+        }
+    }
+
+    fn write_read_at(&self, addr: u16, payload: &[u8], read_len: usize) -> io::Result<Vec<u8>> {
+        match self {
+            Self::I2cDev(transport) => transport.write_read_at(addr, payload, read_len),
+            Self::Rm(transport) => transport.write_read_at(addr, payload, read_len),
+        }
+    }
+}
+
+pub(crate) fn format_head(payload: &[u8]) -> String {
     payload
         .iter()
         .take(16)

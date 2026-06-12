@@ -1,14 +1,15 @@
 mod args;
 
-use args::{Args, ProbeRgbArgs, RunArgs};
+use args::{Args, ProbeRgbArgs, RunArgs, TransportKind};
 use gigabyte_lcd::device::Lcd;
 use gigabyte_lcd::gif::gif_payload_from_path;
 use gigabyte_lcd::image::{mascot_background_from_path, single_frame_payload};
 use gigabyte_lcd::logging;
 use gigabyte_lcd::rgb_discovery::run_rgb_discovery;
+use gigabyte_lcd::rmapi::NvRmI2cTransport;
 use gigabyte_lcd::service::{DisplayUpload, run_display_overlay_loop, run_display_upload_once};
 use gigabyte_lcd::telemetry::NvmlTelemetry;
-use gigabyte_lcd::transport::LinuxI2cTransport;
+use gigabyte_lcd::transport::{AnyTransport, LinuxI2cTransport};
 use std::io;
 
 fn main() -> io::Result<()> {
@@ -30,7 +31,7 @@ fn run_lcd_service(args: RunArgs) -> io::Result<()> {
         let image = mascot_background_from_path(&args.mascot)?;
         DisplayUpload::image(single_frame_payload(&image)?)
     };
-    let transport = LinuxI2cTransport::new(args.bus, args.addr);
+    let transport = open_transport(&args)?;
     let lcd = Lcd::new(&transport, args.device_id);
     if !args.monitoring_enabled {
         return run_display_upload_once(&lcd, upload, args.image_settle_delay);
@@ -45,6 +46,29 @@ fn run_lcd_service(args: RunArgs) -> io::Result<()> {
         args.image_settle_delay,
         args.overlay,
     )
+}
+
+fn open_transport(args: &RunArgs) -> io::Result<AnyTransport> {
+    match args.transport {
+        TransportKind::I2cDev => Ok(AnyTransport::I2cDev(LinuxI2cTransport::new(
+            args.bus, args.addr,
+        ))),
+        TransportKind::Rm => {
+            NvRmI2cTransport::open(args.bus, args.addr, args.i2c_speed).map(AnyTransport::Rm)
+        }
+        TransportKind::Auto => match NvRmI2cTransport::open(args.bus, args.addr, args.i2c_speed) {
+            Ok(transport) => Ok(AnyTransport::Rm(transport)),
+            Err(error) => {
+                logging::info(format!(
+                    "RM transport unavailable ({error}); falling back to /dev/i2c-{}",
+                    args.bus
+                ));
+                Ok(AnyTransport::I2cDev(LinuxI2cTransport::new(
+                    args.bus, args.addr,
+                )))
+            }
+        },
+    }
 }
 
 fn run_rgb_probe(args: ProbeRgbArgs) -> io::Result<()> {
