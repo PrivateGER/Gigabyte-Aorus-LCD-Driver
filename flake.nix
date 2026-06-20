@@ -1,18 +1,49 @@
 {
   description = "Linux control service for Gigabyte AORUS GPU LCD panels";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      home-manager,
+      nixpkgs,
+    }:
     let
-      lib = nixpkgs.lib;
+      inherit (nixpkgs) lib;
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
       forAllSystems = lib.genAttrs supportedSystems;
       pkgsFor = system: import nixpkgs { inherit system; };
+      localSystem = "x86_64-linux";
+      localPkgs = pkgsFor localSystem;
+      localHomeModule = {
+        home = {
+          username = "example";
+          homeDirectory = "/home/example";
+          stateVersion = "26.11";
+        };
+
+        services.gigabyte-lcd = {
+          enable = true;
+          mascot = "/home/example/.config/gigabyte-lcd/background.png";
+          bus = 1;
+          addr = "0x61";
+          deviceId = "0x21";
+          imageSettleDelay = 20;
+          overlayInterval = 4;
+          logLevel = "info";
+          systemdTargets = [ ];
+        };
+      };
     in
     {
       packages = forAllSystems (
@@ -58,9 +89,38 @@
         }
       );
 
-      checks = forAllSystems (system: {
-        default = self.packages.${system}.default;
-      });
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          default = self.packages.${system}.default;
+          home-manager-module =
+            (home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [
+                self.homeModules.default
+                {
+                  home = {
+                    username = "gigabyte-lcd-test";
+                    homeDirectory = "/tmp/gigabyte-lcd-test";
+                    stateVersion = "26.11";
+                  };
+
+                  services.gigabyte-lcd = {
+                    enable = true;
+                    mascot = "/tmp/background.png";
+                    systemdTargets = [ ];
+                  };
+                }
+              ];
+            }).activationPackage;
+        }
+        // lib.optionalAttrs (system == localSystem) {
+          local-home-manager = self.homeConfigurations.example-local.activationPackage;
+        }
+      );
 
       devShells = forAllSystems (
         system:
@@ -82,5 +142,15 @@
       );
 
       formatter = forAllSystems (system: (pkgsFor system).nixfmt);
+
+      homeModules.default = import ./nix/home-manager.nix self;
+
+      homeConfigurations.example-local = home-manager.lib.homeManagerConfiguration {
+        pkgs = localPkgs;
+        modules = [
+          self.homeModules.default
+          localHomeModule
+        ];
+      };
     };
 }

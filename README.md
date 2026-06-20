@@ -99,22 +99,53 @@ target/release/gigabyte-lcd \
   --no-monitoring
 ```
 
-## Install User Service
+## Run With Nix
 
-Build the release binary first, install the binary and background image into
-stable user paths, then install the included user unit:
+Build or run the flake package directly:
 
 ```bash
-cargo build --release
-install -Dm755 target/release/gigabyte-lcd ~/.local/bin/gigabyte-lcd
-install -Dm644 path/to/background.png ~/.config/gigabyte-lcd/background.png
-mkdir -p ~/.config/systemd/user
-cp systemd/gigabyte-lcd-rust.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now gigabyte-lcd-rust.service
+nix build github:PrivateGER/Gigabyte-Aorus-LCD-Driver
+nix run github:PrivateGER/Gigabyte-Aorus-LCD-Driver -- --help
 ```
 
-Edit `systemd/gigabyte-lcd-rust.service` with your own image.
+## Home Manager Service
+
+The flake exposes a reusable Home Manager module:
+
+```nix
+{
+  inputs.gigabyte-lcd.url = "github:PrivateGER/Gigabyte-Aorus-LCD-Driver";
+
+  outputs = { home-manager, nixpkgs, gigabyte-lcd, ... }: {
+    homeConfigurations.example = home-manager.lib.homeManagerConfiguration {
+      pkgs = import nixpkgs { system = "x86_64-linux"; };
+      modules = [
+        gigabyte-lcd.homeModules.default
+        {
+          services.gigabyte-lcd = {
+            enable = true;
+            mascot = "/home/example/.config/gigabyte-lcd/background.png";
+            bus = 1;
+            addr = "0x61";
+            deviceId = "0x21";
+            imageSettleDelay = 20;
+            metrics = [
+              "temp"
+              "usage"
+              "power"
+            ];
+            overlayInterval = 4;
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+By default, enabling the module also enables the user systemd service for
+`default.target`. Set `services.gigabyte-lcd.systemdTargets = [ ];` to install
+the unit without starting it automatically.
 
 ## Experimental GIF Mode
 
