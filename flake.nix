@@ -23,27 +23,6 @@
       ];
       forAllSystems = lib.genAttrs supportedSystems;
       pkgsFor = system: import nixpkgs { inherit system; };
-      localSystem = "x86_64-linux";
-      localPkgs = pkgsFor localSystem;
-      localHomeModule = {
-        home = {
-          username = "example";
-          homeDirectory = "/home/example";
-          stateVersion = "26.11";
-        };
-
-        services.gigabyte-lcd = {
-          enable = true;
-          mascot = "/home/example/.config/gigabyte-lcd/background.png";
-          bus = 1;
-          addr = "0x61";
-          deviceId = "0x21";
-          imageSettleDelay = 20;
-          overlayInterval = 4;
-          logLevel = "info";
-          systemdTargets = [ ];
-        };
-      };
     in
     {
       packages = forAllSystems (
@@ -117,9 +96,6 @@
               ];
             }).activationPackage;
         }
-        // lib.optionalAttrs (system == localSystem) {
-          local-home-manager = self.homeConfigurations.example-local.activationPackage;
-        }
       );
 
       devShells = forAllSystems (
@@ -144,13 +120,5 @@
       formatter = forAllSystems (system: (pkgsFor system).nixfmt);
 
       homeModules.default = import ./nix/home-manager.nix self;
-
-      homeConfigurations.example-local = home-manager.lib.homeManagerConfiguration {
-        pkgs = localPkgs;
-        modules = [
-          self.homeModules.default
-          localHomeModule
-        ];
-      };
     };
 }
